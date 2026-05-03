@@ -3,6 +3,9 @@
 # DB: Supabase (PostgreSQL via psycopg2)
 # Email: Gmail SMTP (via smtplib)
 
+from dotenv import load_dotenv
+load_dotenv()
+
 import os
 import smtplib
 import logging
