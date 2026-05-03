@@ -14,6 +14,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.get("/")
+def root():
+    return {"status": "running"}
+
 @app.post("/contact")
 async def contact(name: str = Form(...), email: str = Form(...), message: str = Form(...)):
     try:
@@ -28,7 +32,6 @@ async def contact(name: str = Form(...), email: str = Form(...), message: str = 
         db.add(new_contact)
         db.commit()
 
-        return {"message": "Message received ✅"}
-
+        return {"message": "Message received"}
     except Exception as e:
-        return {"message": "Error occurred ❌"}
+        return {"error": str(e)}
