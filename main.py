@@ -1,7 +1,7 @@
 # main.py — FastAPI Backend for Portfolio Contact Form
 # Deployed on: Render
 # DB: Supabase (PostgreSQL via psycopg2)
-# Email: Resend API over HTTPS (only method that works on Render free tier)
+# Email: Brevo (Sendinblue) API — 300 free/day, no Cloudflare blocks
 
 import os
 import logging
@@ -28,7 +28,7 @@ app = FastAPI(title="Portfolio Contact API", version="2.0.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "https://adityaportfolio-lemon.vercel.app",  # ← Replace with your Vercel URL
+        "https://adityaportfolio-lemon.vercel.app",
         "http://localhost:5173",
         "http://localhost:3000",
     ],
@@ -39,9 +39,8 @@ app.add_middleware(
 
 # ─── Environment Variables ────────────────────────────────────────────────────
 SUPABASE_DB_URL = os.getenv("SUPABASE_DB_URL")
-RESEND_API_KEY  = os.getenv("RESEND_API_KEY")
-NOTIFY_TO_EMAIL = os.getenv("NOTIFY_TO_EMAIL")
-FROM_EMAIL      = os.getenv("FROM_EMAIL", "onboarding@resend.dev")
+BREVO_API_KEY   = os.getenv("BREVO_API_KEY")
+NOTIFY_TO_EMAIL = os.getenv("NOTIFY_TO_EMAIL")  # aditya021201@gmail.com
 
 
 # ─── Pydantic Schemas ─────────────────────────────────────────────────────────
@@ -113,56 +112,62 @@ def save_contact_to_db(name: str, email: str, message: str) -> None:
             conn.close()
 
 
-# ─── Email via Resend HTTPS API ───────────────────────────────────────────────
+# ─── Email via Brevo API ───────────────────────────────────────────────────────
 def send_notification_email(name: str, email: str, message: str) -> None:
-    if not RESEND_API_KEY:
-        logger.warning("[Email] RESEND_API_KEY not set — skipping.")
+    if not BREVO_API_KEY:
+        logger.warning("[Email] BREVO_API_KEY not set — skipping.")
         return
     if not NOTIFY_TO_EMAIL:
         logger.warning("[Email] NOTIFY_TO_EMAIL not set — skipping.")
         return
 
-    logger.info(f"[Email] Attempting to send via Resend to {NOTIFY_TO_EMAIL}")
-
-    html_body = f"""
-    <div style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:24px;">
-      <h2 style="color:#7c3aed;">New Portfolio Contact</h2>
-      <table style="width:100%;border-collapse:collapse;">
-        <tr>
-          <td style="padding:8px;color:#666;width:80px;">Name</td>
-          <td style="padding:8px;font-weight:600;">{name}</td>
-        </tr>
-        <tr style="background:#f9f9f9;">
-          <td style="padding:8px;color:#666;">Email</td>
-          <td style="padding:8px;">
-            <a href="mailto:{email}">{email}</a>
-          </td>
-        </tr>
-        <tr>
-          <td style="padding:8px;color:#666;">Time</td>
-          <td style="padding:8px;">{datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC</td>
-        </tr>
-      </table>
-      <div style="margin-top:20px;padding:16px;background:#f3f0ff;border-radius:8px;">
-        <p style="margin:0;color:#333;white-space:pre-wrap;">{message}</p>
-      </div>
-    </div>
-    """
+    logger.info(f"[Email] Sending via Brevo to {NOTIFY_TO_EMAIL}")
 
     payload = json.dumps({
-        "from": FROM_EMAIL,
-        "to": [NOTIFY_TO_EMAIL],
-        "reply_to": email,
+        "sender": {
+            "name": "Portfolio Contact Form",
+            "email": NOTIFY_TO_EMAIL,   # Brevo allows sending from your own email
+        },
+        "to": [{"email": NOTIFY_TO_EMAIL, "name": "Aditya"}],
+        "replyTo": {"email": email, "name": name},
         "subject": f"New Portfolio Contact from {name}",
-        "html": html_body,
+        "htmlContent": f"""
+        <div style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:24px;">
+          <h2 style="color:#7c3aed;">New Portfolio Contact</h2>
+          <table style="width:100%;border-collapse:collapse;">
+            <tr>
+              <td style="padding:8px;color:#666;width:80px;"><b>Name</b></td>
+              <td style="padding:8px;">{name}</td>
+            </tr>
+            <tr style="background:#f9f9f9;">
+              <td style="padding:8px;color:#666;"><b>Email</b></td>
+              <td style="padding:8px;">
+                <a href="mailto:{email}">{email}</a>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:8px;color:#666;"><b>Time</b></td>
+              <td style="padding:8px;">{datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC</td>
+            </tr>
+          </table>
+          <div style="margin-top:20px;padding:16px;background:#f3f0ff;border-radius:8px;">
+            <b>Message:</b>
+            <p style="margin:8px 0 0;color:#333;white-space:pre-wrap;">{message}</p>
+          </div>
+          <p style="margin-top:20px;color:#888;font-size:13px;">
+            Hit reply to respond directly to {email}
+          </p>
+        </div>
+        """,
     }).encode("utf-8")
 
     req = urllib.request.Request(
-        "https://api.resend.com/emails",
+        "https://api.brevo.com/v3/smtp/email",
         data=payload,
         headers={
-            "Authorization": f"Bearer {RESEND_API_KEY}",
+            "api-key": BREVO_API_KEY,
             "Content-Type": "application/json",
+            "Accept": "application/json",
         },
         method="POST",
     )
@@ -170,12 +175,12 @@ def send_notification_email(name: str, email: str, message: str) -> None:
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
             result = json.loads(resp.read())
-            logger.info(f"[Email] SUCCESS — Resend ID: {result.get('id')}")
+            logger.info(f"[Email] SUCCESS — Brevo messageId: {result.get('messageId')}")
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", errors="ignore")
-        logger.error(f"[Email] Resend HTTP {e.code}: {body}")
+        logger.error(f"[Email] Brevo HTTP {e.code}: {body}")
     except Exception as e:
-        logger.error(f"[Email] Resend failed: {type(e).__name__}: {e}")
+        logger.error(f"[Email] Brevo failed: {type(e).__name__}: {e}")
 
 
 def send_notification_email_async(name: str, email: str, message: str) -> None:
