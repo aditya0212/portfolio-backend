@@ -1,15 +1,14 @@
 # main.py — FastAPI Backend for Portfolio Contact Form
 # Deployed on: Render
 # DB: Supabase (PostgreSQL via psycopg2)
-# Email: Gmail SMTP via SSL port 465 (reliable on Render)
+# Email: Resend API over HTTPS (only method that works on Render free tier)
 
 import os
 import logging
 import threading
-import smtplib
-import ssl
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
+import urllib.request
+import urllib.error
+import json
 from datetime import datetime
 
 import psycopg2
@@ -40,9 +39,9 @@ app.add_middleware(
 
 # ─── Environment Variables ────────────────────────────────────────────────────
 SUPABASE_DB_URL = os.getenv("SUPABASE_DB_URL")
-SMTP_USER       = os.getenv("SMTP_USER")       # your Gmail: aditya021201@gmail.com
-SMTP_PASSWORD   = os.getenv("SMTP_PASSWORD")   # 16-char App Password (no spaces)
-NOTIFY_TO_EMAIL = os.getenv("NOTIFY_TO_EMAIL") # same Gmail or any destination
+RESEND_API_KEY  = os.getenv("RESEND_API_KEY")
+NOTIFY_TO_EMAIL = os.getenv("NOTIFY_TO_EMAIL")
+FROM_EMAIL      = os.getenv("FROM_EMAIL", "onboarding@resend.dev")
 
 
 # ─── Pydantic Schemas ─────────────────────────────────────────────────────────
@@ -114,45 +113,69 @@ def save_contact_to_db(name: str, email: str, message: str) -> None:
             conn.close()
 
 
-# ─── Email via Gmail SSL port 465 ─────────────────────────────────────────────
+# ─── Email via Resend HTTPS API ───────────────────────────────────────────────
 def send_notification_email(name: str, email: str, message: str) -> None:
-    if not SMTP_USER or not SMTP_PASSWORD or not NOTIFY_TO_EMAIL:
-        logger.warning("[Email] SMTP_USER / SMTP_PASSWORD / NOTIFY_TO_EMAIL not set — skipping.")
+    if not RESEND_API_KEY:
+        logger.warning("[Email] RESEND_API_KEY not set — skipping.")
+        return
+    if not NOTIFY_TO_EMAIL:
+        logger.warning("[Email] NOTIFY_TO_EMAIL not set — skipping.")
         return
 
-    subject = f"New Portfolio Contact from {name}"
-    body = f"""
-New message from your portfolio contact form.
+    logger.info(f"[Email] Attempting to send via Resend to {NOTIFY_TO_EMAIL}")
 
-Name:    {name}
-Email:   {email}
-Time:    {datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC
+    html_body = f"""
+    <div style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:24px;">
+      <h2 style="color:#7c3aed;">New Portfolio Contact</h2>
+      <table style="width:100%;border-collapse:collapse;">
+        <tr>
+          <td style="padding:8px;color:#666;width:80px;">Name</td>
+          <td style="padding:8px;font-weight:600;">{name}</td>
+        </tr>
+        <tr style="background:#f9f9f9;">
+          <td style="padding:8px;color:#666;">Email</td>
+          <td style="padding:8px;">
+            <a href="mailto:{email}">{email}</a>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:8px;color:#666;">Time</td>
+          <td style="padding:8px;">{datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC</td>
+        </tr>
+      </table>
+      <div style="margin-top:20px;padding:16px;background:#f3f0ff;border-radius:8px;">
+        <p style="margin:0;color:#333;white-space:pre-wrap;">{message}</p>
+      </div>
+    </div>
+    """
 
-Message:
-{message}
+    payload = json.dumps({
+        "from": FROM_EMAIL,
+        "to": [NOTIFY_TO_EMAIL],
+        "reply_to": email,
+        "subject": f"New Portfolio Contact from {name}",
+        "html": html_body,
+    }).encode("utf-8")
 
----
-Reply directly to: {email}
-"""
-
-    msg = MIMEMultipart("alternative")
-    msg["Subject"]  = subject
-    msg["From"]     = SMTP_USER
-    msg["To"]       = NOTIFY_TO_EMAIL
-    msg["Reply-To"] = email
-    msg.attach(MIMEText(body, "plain"))
+    req = urllib.request.Request(
+        "https://api.resend.com/emails",
+        data=payload,
+        headers={
+            "Authorization": f"Bearer {RESEND_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
 
     try:
-        # Port 465 with SSL — works on Render, no STARTTLS needed
-        context = ssl.create_default_context()
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=context, timeout=15) as server:
-            server.login(SMTP_USER, SMTP_PASSWORD)
-            server.sendmail(SMTP_USER, NOTIFY_TO_EMAIL, msg.as_string())
-        logger.info(f"[Email] Sent successfully to {NOTIFY_TO_EMAIL}")
-    except smtplib.SMTPAuthenticationError:
-        logger.error("[Email] Auth failed — check SMTP_USER and SMTP_PASSWORD (App Password, no spaces)")
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            result = json.loads(resp.read())
+            logger.info(f"[Email] SUCCESS — Resend ID: {result.get('id')}")
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="ignore")
+        logger.error(f"[Email] Resend HTTP {e.code}: {body}")
     except Exception as e:
-        logger.error(f"[Email] Failed: {e}")
+        logger.error(f"[Email] Resend failed: {type(e).__name__}: {e}")
 
 
 def send_notification_email_async(name: str, email: str, message: str) -> None:
