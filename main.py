@@ -1,20 +1,22 @@
 # main.py — FastAPI Backend for Portfolio Contact Form
 # Deployed on: Render
 # DB: Supabase (PostgreSQL via psycopg2)
-# Email: Resend API (reliable, free, 100 emails/day)
+# Email: Gmail SMTP via SSL port 465 (reliable on Render)
 
 import os
 import logging
 import threading
-import urllib.request
-import json
+import smtplib
+import ssl
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 from datetime import datetime
 
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, EmailStr, field_validator
+from pydantic import BaseModel, field_validator
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO)
@@ -38,34 +40,44 @@ app.add_middleware(
 
 # ─── Environment Variables ────────────────────────────────────────────────────
 SUPABASE_DB_URL = os.getenv("SUPABASE_DB_URL")
-RESEND_API_KEY  = os.getenv("RESEND_API_KEY")
-NOTIFY_TO_EMAIL = os.getenv("NOTIFY_TO_EMAIL")
-FROM_EMAIL      = os.getenv("FROM_EMAIL", "onboarding@resend.dev")
+SMTP_USER       = os.getenv("SMTP_USER")       # your Gmail: aditya021201@gmail.com
+SMTP_PASSWORD   = os.getenv("SMTP_PASSWORD")   # 16-char App Password (no spaces)
+NOTIFY_TO_EMAIL = os.getenv("NOTIFY_TO_EMAIL") # same Gmail or any destination
 
 
 # ─── Pydantic Schemas ─────────────────────────────────────────────────────────
 class ContactRequest(BaseModel):
     name: str
-    email: EmailStr
+    email: str
     message: str
 
     @field_validator("name")
     @classmethod
     def name_not_empty(cls, v: str) -> str:
-        if not v.strip():
+        v = v.strip()
+        if not v:
             raise ValueError("Name must not be empty")
-        if len(v.strip()) > 100:
+        if len(v) > 100:
             raise ValueError("Name must be under 100 characters")
-        return v.strip()
+        return v
+
+    @field_validator("email")
+    @classmethod
+    def email_basic_check(cls, v: str) -> str:
+        v = v.strip()
+        if not v or "@" not in v:
+            raise ValueError("Invalid email address")
+        return v
 
     @field_validator("message")
     @classmethod
     def message_not_empty(cls, v: str) -> str:
-        if not v.strip():
+        v = v.strip()
+        if not v:
             raise ValueError("Message must not be empty")
-        if len(v.strip()) > 5000:
+        if len(v) > 5000:
             raise ValueError("Message must be under 5000 characters")
-        return v.strip()
+        return v
 
 
 class ContactResponse(BaseModel):
@@ -102,64 +114,45 @@ def save_contact_to_db(name: str, email: str, message: str) -> None:
             conn.close()
 
 
-# ─── Email via Resend ─────────────────────────────────────────────────────────
+# ─── Email via Gmail SSL port 465 ─────────────────────────────────────────────
 def send_notification_email(name: str, email: str, message: str) -> None:
-    if not RESEND_API_KEY or not NOTIFY_TO_EMAIL:
-        logger.warning("[Email] RESEND_API_KEY or NOTIFY_TO_EMAIL not set — skipping.")
+    if not SMTP_USER or not SMTP_PASSWORD or not NOTIFY_TO_EMAIL:
+        logger.warning("[Email] SMTP_USER / SMTP_PASSWORD / NOTIFY_TO_EMAIL not set — skipping.")
         return
 
-    html_body = f"""
-    <div style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:24px;">
-      <h2 style="color:#7c3aed;">New Portfolio Contact</h2>
-      <table style="width:100%;border-collapse:collapse;">
-        <tr>
-          <td style="padding:8px;color:#666;width:80px;">Name</td>
-          <td style="padding:8px;font-weight:600;">{name}</td>
-        </tr>
-        <tr style="background:#f9f9f9;">
-          <td style="padding:8px;color:#666;">Email</td>
-          <td style="padding:8px;font-weight:600;">
-            <a href="mailto:{email}">{email}</a>
-          </td>
-        </tr>
-        <tr>
-          <td style="padding:8px;color:#666;">Time</td>
-          <td style="padding:8px;">{datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC</td>
-        </tr>
-      </table>
-      <div style="margin-top:20px;padding:16px;background:#f3f0ff;border-radius:8px;">
-        <p style="margin:0;color:#333;white-space:pre-wrap;">{message}</p>
-      </div>
-      <p style="margin-top:20px;color:#888;font-size:13px;">
-        Reply directly to <a href="mailto:{email}">{email}</a>
-      </p>
-    </div>
-    """
+    subject = f"New Portfolio Contact from {name}"
+    body = f"""
+New message from your portfolio contact form.
 
-    payload = json.dumps({
-        "from": FROM_EMAIL,
-        "to": [NOTIFY_TO_EMAIL],
-        "reply_to": email,
-        "subject": f"New Portfolio Contact from {name}",
-        "html": html_body,
-    }).encode("utf-8")
+Name:    {name}
+Email:   {email}
+Time:    {datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC
 
-    req = urllib.request.Request(
-        "https://api.resend.com/emails",
-        data=payload,
-        headers={
-            "Authorization": f"Bearer {RESEND_API_KEY}",
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
+Message:
+{message}
+
+---
+Reply directly to: {email}
+"""
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"]  = subject
+    msg["From"]     = SMTP_USER
+    msg["To"]       = NOTIFY_TO_EMAIL
+    msg["Reply-To"] = email
+    msg.attach(MIMEText(body, "plain"))
 
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            result = json.loads(resp.read())
-            logger.info(f"[Email] Sent via Resend. ID: {result.get('id')}")
+        # Port 465 with SSL — works on Render, no STARTTLS needed
+        context = ssl.create_default_context()
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=context, timeout=15) as server:
+            server.login(SMTP_USER, SMTP_PASSWORD)
+            server.sendmail(SMTP_USER, NOTIFY_TO_EMAIL, msg.as_string())
+        logger.info(f"[Email] Sent successfully to {NOTIFY_TO_EMAIL}")
+    except smtplib.SMTPAuthenticationError:
+        logger.error("[Email] Auth failed — check SMTP_USER and SMTP_PASSWORD (App Password, no spaces)")
     except Exception as e:
-        logger.error(f"[Email] Resend failed: {e}")
+        logger.error(f"[Email] Failed: {e}")
 
 
 def send_notification_email_async(name: str, email: str, message: str) -> None:
