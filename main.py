@@ -27,7 +27,7 @@ app = FastAPI(title="Portfolio Contact API", version="2.0.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "https://your-portfolio.vercel.app",   # ← Replace with your Vercel URL
+        "https://adityaportfolio-lemon.vercel.app/",   # ← Replace with your Vercel URL
         "http://localhost:5173",               # Vite dev server
         "http://localhost:3000",
     ],
